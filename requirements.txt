@@ -1,0 +1,7 @@
+
+pip install python-telegram-bot
+pip install requests
+pip3 install mistralai
+pip install --upgrade python-telegram-bot mistralai
+python bot.py
+pip install python-telegram-bot --upgrade
