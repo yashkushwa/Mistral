@@ -1,7 +1,3 @@
 python-telegram-bot
 requests
---upgrade pip
 mistralai
---upgrade python-telegram-bot mistralai
-python bot.py
-telegram-bot --upgrade
