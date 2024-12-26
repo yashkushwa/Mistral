@@ -1,6 +1,9 @@
 import requests
+import asyncio
+import json
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.constants import ChatAction
 
 model_prompts = {}
 SELECTED_MODEL = "mistral-tiny"
@@ -74,6 +77,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append(row)
         await query.edit_message_text("Select a model:", reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def stream_response(response):
+    buffer = ""
+    for chunk in response.iter_lines():
+        if chunk:
+            try:
+                json_data = json.loads(chunk.decode('utf-8').replace('data: ', ''))
+                if 'choices' in json_data:
+                    content = json_data['choices'][0].get('delta', {}).get('content', '')
+                    if content:
+                        buffer += content
+                        yield buffer
+            except json.JSONDecodeError:
+                continue
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'awaiting_prompt' in context.user_data:
         model = context.user_data['awaiting_prompt']
@@ -87,17 +104,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         messages.append({"role": "system", "content": model_prompts[SELECTED_MODEL]})
     messages.append({"role": "user", "content": update.message.text})
     
+    # Start typing animation
+    await update.message.chat.send_action(ChatAction.TYPING)
+    
     response = requests.post(
         "https://api.mistral.ai/v1/chat/completions",
         headers={
             "Authorization": f"Bearer q8YtsGpxpt5FHiheOfOLeJPN5N61D4AO",
             "Content-Type": "application/json"
         },
-        json={"model": SELECTED_MODEL, "messages": messages}
+        json={
+            "model": SELECTED_MODEL,
+            "messages": messages,
+            "stream": True
+        },
+        stream=True
     )
-    response_text = response.json()['choices'][0]['message']['content']
-    formatted_text = f"{response_text}\n\nUsing model: `{SELECTED_MODEL}`"
-    await update.message.reply_text(formatted_text, parse_mode='Markdown')
+
+    # Send initial message
+    initial_message = await update.message.reply_text("...")
+    last_update_time = asyncio.get_event_loop().time()
+    
+    async for current_response in stream_response(response):
+        current_time = asyncio.get_event_loop().time()
+        # Update message content if enough time has passed
+        if current_time - last_update_time >= 1.0:
+            formatted_text = f"{current_response}\n\nUsing model: `{SELECTED_MODEL}`"
+            try:
+                await initial_message.edit_text(formatted_text, parse_mode='Markdown')
+                last_update_time = current_time
+            except Exception:
+                continue
+            # Refresh typing animation
+            await update.message.chat.send_action(ChatAction.TYPING)
+    
+    # Final update with complete response
+    final_text = f"{current_response}\n\nUsing model: `{SELECTED_MODEL}`"
+    await initial_message.edit_text(final_text, parse_mode='Markdown')
 
 def main():
     app = ApplicationBuilder().token("7769194021:AAHb39XYKKc57vxKfUL5MHjICvgNsHijrVk").build()
