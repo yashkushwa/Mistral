@@ -7,9 +7,10 @@ from telegram.constants import ChatAction
 
 model_prompts = {}
 SELECTED_MODEL = "mistral-tiny"
+api_keys = {}  # Store user-specific API keys
 
-async def get_models():
-    headers = {"Authorization": f"Bearer q8YtsGpxpt5FHiheOfOLeJPN5N61D4AO"}
+async def get_models(api_key):
+    headers = {"Authorization": f"Bearer {api_key}"}
     response = requests.get("https://api.mistral.ai/v1/models", headers=headers)
     return [model['id'] for model in response.json()['data']]
 
@@ -19,20 +20,47 @@ def get_prompt_preview(prompt):
     lines = prompt.split('\n')
     return '\n'.join(lines[:2] + ['...'] if len(lines) > 2 else lines)
 
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("Set API Key", callback_data="set_api_key")],
+        [InlineKeyboardButton("Check Current API Key", callback_data="check_api_key")],
+        [InlineKeyboardButton("Back to Models", callback_data="back_to_models")]
+    ]
+    await update.message.reply_text(
+        "Settings Menu:\nManage your Mistral AI API key and other settings.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[KeyboardButton("/start")]]
+    user_id = update.effective_user.id
+    if user_id not in api_keys:
+        await update.message.reply_text(
+            "Welcome! Please set up your Mistral AI API key first using /settings"
+        )
+        await settings_command(update, context)
+        return
+
+    keyboard = [[KeyboardButton("/start"), KeyboardButton("/settings")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
-    models = await get_models()
-    inline_keyboard = []
-    for i in range(0, len(models), 2):
-        row = [InlineKeyboardButton(models[i], callback_data=f"model_{models[i]}")]
-        if i + 1 < len(models):
-            row.append(InlineKeyboardButton(models[i + 1], callback_data=f"model_{models[i + 1]}"))
-        inline_keyboard.append(row)
-    inline_markup = InlineKeyboardMarkup(inline_keyboard)
-    
-    await update.message.reply_text("Welcome! Select a model:", reply_markup=inline_markup)
+    try:
+        models = await get_models(api_keys[user_id])
+        inline_keyboard = []
+        for i in range(0, len(models), 2):
+            row = [InlineKeyboardButton(models[i], callback_data=f"model_{models[i]}")]
+            if i + 1 < len(models):
+                row.append(InlineKeyboardButton(models[i + 1], callback_data=f"model_{models[i + 1]}"))
+            inline_keyboard.append(row)
+        inline_markup = InlineKeyboardMarkup(inline_keyboard)
+        
+        await update.message.reply_text(
+            "Select a model:", 
+            reply_markup=inline_markup
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            "Error fetching models. Please check your API key in /settings"
+        )
 
 async def show_prompt_menu(update: Update, model_id):
     current_prompt = model_prompts.get(model_id, "")
@@ -52,8 +80,35 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global SELECTED_MODEL
     query = update.callback_query
     await query.answer()
+    user_id = update.effective_user.id
 
-    if query.data.startswith("model_"):
+    if query.data == "set_api_key":
+        await query.edit_message_text(
+            "Please enter your Mistral AI API key:"
+        )
+        context.user_data['awaiting_api_key'] = True
+    
+    elif query.data == "check_api_key":
+        api_key = api_keys.get(user_id, "No API key set")
+        masked_key = f"{api_key[:8]}...{api_key[-4:]}" if api_key != "No API key set" else api_key
+        keyboard = [[InlineKeyboardButton("Back to Settings", callback_data="back_to_settings")]]
+        await query.edit_message_text(
+            f"Your current API key: {masked_key}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    elif query.data == "back_to_settings":
+        keyboard = [
+            [InlineKeyboardButton("Set API Key", callback_data="set_api_key")],
+            [InlineKeyboardButton("Check Current API Key", callback_data="check_api_key")],
+            [InlineKeyboardButton("Back to Models", callback_data="back_to_models")]
+        ]
+        await query.edit_message_text(
+            "Settings Menu:\nManage your Mistral AI API key and other settings.",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif query.data.startswith("model_"):
         SELECTED_MODEL = query.data.replace("model_", "")
         await show_prompt_menu(query, SELECTED_MODEL)
     
@@ -68,14 +123,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_prompt_menu(query, model)
     
     elif query.data == "back_to_models":
-        models = await get_models()
-        keyboard = []
-        for i in range(0, len(models), 2):
-            row = [InlineKeyboardButton(models[i], callback_data=f"model_{models[i]}")]
-            if i + 1 < len(models):
-                row.append(InlineKeyboardButton(models[i + 1], callback_data=f"model_{models[i + 1]}"))
-            keyboard.append(row)
-        await query.edit_message_text("Select a model:", reply_markup=InlineKeyboardMarkup(keyboard))
+        if user_id not in api_keys:
+            await query.edit_message_text(
+                "Please set up your API key first using /settings"
+            )
+            return
+            
+        try:
+            models = await get_models(api_keys[user_id])
+            keyboard = []
+            for i in range(0, len(models), 2):
+                row = [InlineKeyboardButton(models[i], callback_data=f"model_{models[i]}")]
+                if i + 1 < len(models):
+                    row.append(InlineKeyboardButton(models[i + 1], callback_data=f"model_{models[i + 1]}"))
+                keyboard.append(row)
+            await query.edit_message_text("Select a model:", reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception as e:
+            await query.edit_message_text(
+                "Error fetching models. Please check your API key in /settings"
+            )
 
 async def stream_response(response):
     buffer = ""
@@ -92,6 +158,18 @@ async def stream_response(response):
                 continue
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if context.user_data.get('awaiting_api_key'):
+        api_keys[user_id] = update.message.text
+        del context.user_data['awaiting_api_key']
+        # Delete the message containing the API key
+        await update.message.delete()
+        await update.message.reply_text(
+            "API key has been set successfully! You can now use /start to begin using the bot."
+        )
+        return
+
     if 'awaiting_prompt' in context.user_data:
         model = context.user_data['awaiting_prompt']
         model_prompts[model] = update.message.text
@@ -99,18 +177,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_prompt_menu(update, model)
         return
 
+    if user_id not in api_keys:
+        await update.message.reply_text(
+            "Please set up your API key first using /settings"
+        )
+        return
+
     messages = []
     if SELECTED_MODEL in model_prompts and model_prompts[SELECTED_MODEL]:
         messages.append({"role": "system", "content": model_prompts[SELECTED_MODEL]})
     messages.append({"role": "user", "content": update.message.text})
     
-    # Start typing animation
     await update.message.chat.send_action(ChatAction.TYPING)
     
     response = requests.post(
         "https://api.mistral.ai/v1/chat/completions",
         headers={
-            "Authorization": f"Bearer q8YtsGpxpt5FHiheOfOLeJPN5N61D4AO",
+            "Authorization": f"Bearer {api_keys[user_id]}",
             "Content-Type": "application/json"
         },
         json={
@@ -121,13 +204,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stream=True
     )
 
-    # Send initial message
     initial_message = await update.message.reply_text("...")
     last_update_time = asyncio.get_event_loop().time()
     
     async for current_response in stream_response(response):
         current_time = asyncio.get_event_loop().time()
-        # Update message content if enough time has passed
         if current_time - last_update_time >= 1.0:
             formatted_text = f"{current_response}\n\nUsing model: `{SELECTED_MODEL}`"
             try:
@@ -135,16 +216,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 last_update_time = current_time
             except Exception:
                 continue
-            # Refresh typing animation
             await update.message.chat.send_action(ChatAction.TYPING)
     
-    # Final update with complete response
     final_text = f"{current_response}\n\nUsing model: `{SELECTED_MODEL}`"
     await initial_message.edit_text(final_text, parse_mode='Markdown')
 
 def main():
     app = ApplicationBuilder().token("7769194021:AAHb39XYKKc57vxKfUL5MHjICvgNsHijrVk").build()
     app.add_handler(CommandHandler('start', start_command))
+    app.add_handler(CommandHandler('settings', settings_command))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("Bot started...")
